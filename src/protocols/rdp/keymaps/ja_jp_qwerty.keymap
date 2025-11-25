@@ -31,12 +31,33 @@ map +shift      0x10..0x1B      ~ "QWERTYUIOP`{"
 map +shift      0x1E..0x28 0x2B ~ "ASDFGHJKL+*}"
 map +shift      0x2C..0x35 0x73 ~ "ZXCVBNM<>?_"
 
-map -shift      0x29            ~ 0xFF28
+# The halfwidth/fullwidth key (半角/全角) - scancode 0x29
+# This key toggles between Japanese and English input modes
+# Using Zenkaku_Hankaku (0xFF2A) as the primary keysym
+
+# Zenkaku_Hankaku toggle key (primary mapping for 半角/全角)
 map -shift      0x29            ~ 0xFF2A
-map +shift      0x29            ~ 0xFF29
-map -shift      0x29            ~ 0xFF21 # KanjiMode
-map -shift      0x70            ~ 0xFF27 # HiraganaKatakana
-map -shift      0x70            ~ 0xFF24 # Romaji
-map -shift      0x7B            ~ 0xFF22 # NonConvert
-map -shift      0x79            ~ 0xFF23 # Convert
-map -shift      0x3A            ~ 0xFF30 # Alphanumeric
+
+# Alternative keysyms that may be sent by different clients
+# Map them all to the same scancode for consistency
+map -shift      0x29            ~ 0xFF28    # Zenkaku
+map +shift      0x29            ~ 0xFF29    # Hankaku
+map -shift      0x29            ~ 0xFF21    # KanjiMode / Kanji
+
+# Hiragana/Katakana toggle key (カタカナ/ひらがな)
+map -shift      0x70            ~ 0xFF27    # HiraganaKatakana
+map -shift      0x70            ~ 0xFF25    # Hiragana
+map -shift      0x70            ~ 0xFF26    # Katakana
+map -shift      0x70            ~ 0xFF24    # Romaji
+
+# Muhenkan key (無変換) - NonConvert
+map -shift      0x7B            ~ 0xFF22    # NonConvert
+
+# Henkan key (変換) - Convert  
+map -shift      0x79            ~ 0xFF23    # Convert
+
+# Eisu/Alphanumeric key (英数)
+map -shift      0x3A            ~ 0xFF30    # Alphanumeric / Eisu_toggle
+
+# Kana key
+map -shift      0x70            ~ 0xFF2D    # Kana_Lock
