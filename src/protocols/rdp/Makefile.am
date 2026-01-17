@@ -59,6 +59,7 @@ libguac_client_rdp_la_SOURCES =                  \
     channels/rdpgfx.c                            \
     channels/rdpsnd/rdpsnd-messages.c            \
     channels/rdpsnd/rdpsnd.c                     \
+    channels/usb-redirection/usb-redirection.c   \
     client.c                                     \
     color.c                                      \
     decompose.c                                  \
@@ -105,6 +106,7 @@ noinst_HEADERS =                                 \
     channels/rdpgfx.h                            \
     channels/rdpsnd/rdpsnd-messages.h            \
     channels/rdpsnd/rdpsnd.h                     \
+    channels/usb-redirection/usb-redirection.h   \
     client.h                                     \
     color.h                                      \
     decompose.h                                  \
@@ -120,6 +122,8 @@ noinst_HEADERS =                                 \
     plugins/channels.h                           \
     plugins/guacai/guacai-messages.h             \
     plugins/guacai/guacai.h                      \
+    plugins/guacusb/guacusb-messages.h           \
+    plugins/guacusb/guacusb.h                    \
     plugins/ptr-string.h                         \
     pointer.h                                    \
     print-job.h                                  \
@@ -153,7 +157,8 @@ libguac_client_rdp_la_LIBADD = \
 
 freerdp_LTLIBRARIES =            \
     libguac-common-svc-client.la \
-    libguacai-client.la
+    libguacai-client.la            \
+    libguacusb-client.la
 
 freerdpdir = @FREERDP_PLUGIN_DIR@
 
@@ -200,6 +205,31 @@ libguacai_client_la_LDFLAGS =      \
 
 libguacai_client_la_LIBADD = \
     @COMMON_LTLIB@           \
+    @LIBGUAC_LTLIB@
+
+#
+# URBDRC USB Redirection Plugin - OWNS ALL USB FUNCTIONALITY
+#
+
+libguacusb_client_la_SOURCES =                          \
+    plugins/guacusb/guacusb-messages.c                  \
+    plugins/guacusb/guacusb.c                           \
+    plugins/ptr-string.c
+
+libguacusb_client_la_CFLAGS = \
+    -Werror -Wall -Iinclude   \
+    @COMMON_INCLUDE@          \
+    @COMMON_SSH_INCLUDE@      \
+    @LIBGUAC_INCLUDE@         \
+    @RDP_CFLAGS@
+
+libguacusb_client_la_LDFLAGS =     \
+    -module -avoid-version -shared \
+    @PTHREAD_LIBS@                 \
+    @RDP_LIBS@
+
+libguacusb_client_la_LIBADD = \
+    @COMMON_LTLIB@            \
     @LIBGUAC_LTLIB@
 
 #

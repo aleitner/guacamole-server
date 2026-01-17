@@ -31,6 +31,7 @@
 #include "channels/rdpei.h"
 #include "channels/rdpgfx.h"
 #include "channels/rdpsnd/rdpsnd.h"
+#include "channels/usb-redirection/usb-redirection.h"
 #include "client.h"
 #include "color.h"
 #include "config.h"
@@ -134,6 +135,10 @@ static BOOL rdp_freerdp_load_channels(freerdp* instance) {
         /* Downgrade the lock to allow for concurrent read access */
         guac_rwlock_release_lock(&(rdp_client->lock));
     }
+
+    /* Load USB redirection plugin if enabled */
+    if (settings->usb_enabled)
+        guac_rdp_usb_load_plugin(context);
 
     /* Load "cliprdr" service if not disabled */
     if (!(settings->disable_copy && settings->disable_paste))
