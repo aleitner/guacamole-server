@@ -46,6 +46,13 @@
     "https://login.microsoftonline.com/%s/oauth2/v2.0/authorize"
 
 /**
+ * Azure AD GetCredentialType endpoint URL format.
+ * The %s placeholder is replaced with the tenant ID.
+ */
+#define GUAC_AAD_GET_CREDENTIAL_TYPE_ENDPOINT \
+    "https://login.microsoftonline.com/%s/GetCredentialType?mkt=en"
+
+/**
  * The native client redirect URI used for the authorization code flow.
  * This is a special Microsoft-provided redirect URI for non-web applications.
  */
@@ -138,9 +145,96 @@ static size_t guac_rdp_aad_write_callback(void* contents, size_t size,
  *     must free this string using curl_free().
  */
 static char* guac_rdp_aad_urlencode(CURL* curl, const char* str) {
-    if (str == NULL)
+    if (curl == NULL || str == NULL)
         return NULL;
     return curl_easy_escape(curl, str, strlen(str));
+}
+
+/**
+ * A single key/raw-value pair for a form-encoded POST body. The key
+ * must already be in a form safe for inclusion verbatim (typically a
+ * plain identifier); the value is URL-encoded by the body builder.
+ */
+typedef struct guac_rdp_aad_form_field {
+    const char* key;
+    const char* value;
+} guac_rdp_aad_form_field;
+
+/**
+ * Builds an application/x-www-form-urlencoded body from a list of
+ * key/value pairs. Each value is URL-encoded using the given CURL
+ * handle; keys are emitted verbatim. Fields are joined with '&' in
+ * the order given.
+ *
+ * @param curl
+ *     The CURL handle used for URL-encoding values.
+ *
+ * @param fields
+ *     Array of key/value pairs to include in the body.
+ *
+ * @param count
+ *     Number of fields in the array.
+ *
+ * @return
+ *     A newly allocated form body string, or NULL on allocation or
+ *     encoding failure. The caller must free this with guac_mem_free().
+ */
+static char* guac_rdp_aad_build_form_body(CURL* curl,
+        const guac_rdp_aad_form_field* fields, size_t count) {
+
+    if (curl == NULL || fields == NULL)
+        return NULL;
+
+    /* URL-encode all values up front so we can size the output exactly */
+    char** encoded = guac_mem_zalloc(count * sizeof(char*));
+    if (encoded == NULL)
+        return NULL;
+
+    size_t total = 1; /* trailing NUL */
+    for (size_t i = 0; i < count; i++) {
+
+        encoded[i] = guac_rdp_aad_urlencode(curl, fields[i].value);
+        if (encoded[i] == NULL) {
+            for (size_t j = 0; j < i; j++)
+                curl_free(encoded[j]);
+            guac_mem_free(encoded);
+            return NULL;
+        }
+
+        /* "key=value" plus '&' separator (one extra at the end is fine
+         * since we initialized total with the NUL byte) */
+        total += strlen(fields[i].key) + 1 + strlen(encoded[i]) + 1;
+    }
+
+    char* body = guac_mem_alloc(total);
+    if (body == NULL) {
+        for (size_t i = 0; i < count; i++)
+            curl_free(encoded[i]);
+        guac_mem_free(encoded);
+        return NULL;
+    }
+
+    char* pos = body;
+    for (size_t i = 0; i < count; i++) {
+
+        if (i > 0)
+            *pos++ = '&';
+
+        size_t klen = strlen(fields[i].key);
+        memcpy(pos, fields[i].key, klen);
+        pos += klen;
+        *pos++ = '=';
+
+        size_t vlen = strlen(encoded[i]);
+        memcpy(pos, encoded[i], vlen);
+        pos += vlen;
+
+        curl_free(encoded[i]);
+    }
+    *pos = '\0';
+
+    guac_mem_free(encoded);
+    return body;
 }
 
 /**
@@ -536,46 +630,31 @@ static char* guac_rdp_aad_exchange_code_for_token(guac_client* client,
     guac_client_log(client, GUAC_LOG_DEBUG,
             "AAD: Exchanging authorization code for access token");
 
-    /* URL-encode token exchange parameters */
-    char* encoded_client_id = guac_rdp_aad_urlencode(curl, params->client_id);
-    char* encoded_code = guac_rdp_aad_urlencode(curl, auth_code);
-    char* encoded_redirect_uri = guac_rdp_aad_urlencode(curl,
-            GUAC_AAD_NATIVE_REDIRECT_URI);
-    char* encoded_scope = guac_rdp_aad_urlencode(curl, params->scope);
-    char* encoded_req_cnf = params->req_cnf ?
-            guac_rdp_aad_urlencode(curl, params->req_cnf) : NULL;
-
-    if (!encoded_client_id || !encoded_code || !encoded_redirect_uri
-            || !encoded_scope) {
-        guac_client_log(client, GUAC_LOG_ERROR,
-                "AAD: Failed to URL-encode token exchange parameters");
-        goto cleanup;
+    /* Build token exchange POST body. req_cnf (Proof-of-Possession) is
+     * only included when FreeRDP provided one. */
+    guac_rdp_aad_form_field token_fields[6];
+    size_t token_field_count = 0;
+    token_fields[token_field_count++] = (guac_rdp_aad_form_field)
+            { "grant_type", "authorization_code" };
+    token_fields[token_field_count++] = (guac_rdp_aad_form_field)
+            { "client_id", params->client_id };
+    token_fields[token_field_count++] = (guac_rdp_aad_form_field)
+            { "code", auth_code };
+    token_fields[token_field_count++] = (guac_rdp_aad_form_field)
+            { "redirect_uri", GUAC_AAD_NATIVE_REDIRECT_URI };
+    token_fields[token_field_count++] = (guac_rdp_aad_form_field)
+            { "scope", params->scope };
+    if (params->req_cnf != NULL) {
+        token_fields[token_field_count++] = (guac_rdp_aad_form_field)
+                { "req_cnf", params->req_cnf };
     }
 
-    /* Build token exchange POST body */
-    size_t post_data_size = 1024
-            + strlen(encoded_client_id) + strlen(encoded_code)
-            + strlen(encoded_redirect_uri) + strlen(encoded_scope)
-            + (encoded_req_cnf ? strlen(encoded_req_cnf) : 0);
-
-    post_data = guac_mem_alloc(post_data_size);
-
-    int written = snprintf(post_data, post_data_size,
-            "grant_type=authorization_code"
-            "&client_id=%s"
-            "&code=%s"
-            "&redirect_uri=%s"
-            "&scope=%s",
-            encoded_client_id,
-            encoded_code,
-            encoded_redirect_uri,
-            encoded_scope);
-
-    /* Append req_cnf (Proof-of-Possession) if provided by FreeRDP */
-    if (encoded_req_cnf && written > 0
-            && (size_t) written < post_data_size - 1) {
-        snprintf(post_data + written, post_data_size - written,
-                "&req_cnf=%s", encoded_req_cnf);
+    post_data = guac_rdp_aad_build_form_body(curl,
+            token_fields, token_field_count);
+    if (post_data == NULL) {
+        guac_client_log(client, GUAC_LOG_ERROR,
+                "AAD: Failed to build token exchange POST body");
+        goto cleanup;
     }
 
     /* Configure and send the token request */
@@ -616,16 +695,6 @@ static char* guac_rdp_aad_exchange_code_for_token(guac_client* client,
 cleanup:
     if (headers)
         curl_slist_free_all(headers);
-    if (encoded_client_id)
-        curl_free(encoded_client_id);
-    if (encoded_code)
-        curl_free(encoded_code);
-    if (encoded_redirect_uri)
-        curl_free(encoded_redirect_uri);
-    if (encoded_scope)
-        curl_free(encoded_scope);
-    if (encoded_req_cnf)
-        curl_free(encoded_req_cnf);
 
     guac_mem_free(post_data);
     curl_easy_cleanup(curl);
@@ -670,7 +739,7 @@ static void guac_rdp_aad_get_credential_type(guac_client* client,
 
     char gct_url[512];
     snprintf(gct_url, sizeof(gct_url),
-            "https://login.microsoftonline.com/%s/GetCredentialType?mkt=en",
+            GUAC_AAD_GET_CREDENTIAL_TYPE_ENDPOINT,
             params->tenant_id);
 
     /* Build GetCredentialType JSON request body */
@@ -862,61 +931,27 @@ static char* guac_rdp_aad_automated_login(guac_client* client,
     guac_client_log(client, GUAC_LOG_DEBUG,
             "AAD: Posting credentials to login endpoint");
 
-    /* URL-encode credential parameters */
-    char* encoded_login = guac_rdp_aad_urlencode(curl, params->username);
-    char* encoded_passwd = guac_rdp_aad_urlencode(curl, params->password);
-    char* encoded_ctx = guac_rdp_aad_urlencode(curl, ctx);
-    char* encoded_flowtoken = guac_rdp_aad_urlencode(curl, flow_token);
-    char* encoded_canary = guac_rdp_aad_urlencode(curl, canary);
+    /* Build credential POST body. Both "login" and "loginfmt" are required
+     * by Microsoft. The canary, ctx, and flowToken are CSRF/session tokens
+     * from the login page $Config (sFTName publishes the canonical name,
+     * which is camelCase "flowToken"). type=11 indicates password auth. */
+    guac_rdp_aad_form_field credential_fields[] = {
+        { "login",      params->username },
+        { "loginfmt",   params->username },
+        { "passwd",     params->password },
+        { "canary",     canary },
+        { "ctx",        ctx },
+        { "flowToken",  flow_token },
+        { "type",       "11" },
+    };
 
-    if (!encoded_login || !encoded_passwd || !encoded_ctx
-            || !encoded_flowtoken || !encoded_canary) {
+    post_data = guac_rdp_aad_build_form_body(curl, credential_fields,
+            sizeof(credential_fields) / sizeof(credential_fields[0]));
+    if (post_data == NULL) {
         guac_client_log(client, GUAC_LOG_ERROR,
-                "AAD: Failed to URL-encode login credentials");
-        if (encoded_login)
-            curl_free(encoded_login);
-        if (encoded_passwd)
-            curl_free(encoded_passwd);
-        if (encoded_ctx)
-            curl_free(encoded_ctx);
-        if (encoded_flowtoken)
-            curl_free(encoded_flowtoken);
-        if (encoded_canary)
-            curl_free(encoded_canary);
+                "AAD: Failed to build credential POST body");
         goto cleanup;
     }
-
-    size_t post_data_size = 1024
-            + (strlen(encoded_login) * 2)
-            + strlen(encoded_passwd)
-            + strlen(encoded_ctx) + strlen(encoded_flowtoken)
-            + strlen(encoded_canary);
-
-    post_data = guac_mem_alloc(post_data_size);
-
-    /* Build credential POST body. Both "login" and "loginfmt" are required
-     * by Microsoft. The canary, ctx, and flowtoken are CSRF/session tokens
-     * from the login page $Config. type=11 indicates password auth. */
-    snprintf(post_data, post_data_size,
-            "login=%s"
-            "&loginfmt=%s"
-            "&passwd=%s"
-            "&canary=%s"
-            "&ctx=%s"
-            "&flowtoken=%s"
-            "&type=11",
-            encoded_login,
-            encoded_login,
-            encoded_passwd,
-            encoded_canary,
-            encoded_ctx,
-            encoded_flowtoken);
-
-    curl_free(encoded_login);
-    curl_free(encoded_passwd);
-    curl_free(encoded_ctx);
-    curl_free(encoded_flowtoken);
-    curl_free(encoded_canary);
 
     /* Reset response buffer for the credential POST */
     guac_rdp_aad_response_free(login_page);
@@ -971,8 +1006,119 @@ static char* guac_rdp_aad_automated_login(guac_client* client,
         auth_code = guac_rdp_aad_extract_auth_code(client, effective_url);
     }
 
-    /* Credential POST did not redirect to the native client URI */
-    else {
+    /* Step 4b: handle the AVD device-binding interstitial. For Azure
+     * Virtual Desktop sessions, after a successful credential POST
+     * Microsoft sometimes serves a /common/rdp/set page that confirms
+     * the user is connecting to a known AVD host (sRdpDeviceDisplayName
+     * is shown to the user). The page carries a fresh $Config and
+     * auto-submits via JavaScript (autoPost=true) before the OAuth
+     * redirect is issued. We replicate that submit by re-extracting
+     * the new tokens from the $Config and POSTing once more. */
+    if (auth_code == NULL && login_page->data != NULL) {
+
+        char* next_url_post = guac_rdp_aad_extract_config_value(
+                login_page->data, "urlPost");
+
+        /* Only follow known device-binding paths, and only when the
+         * urlPost is a relative path (so the URL resolution below is
+         * safe). New interstitial types from Microsoft (KMSI, MFA,
+         * consent, etc.) require different POST shapes and should be
+         * added explicitly. */
+        if (next_url_post != NULL
+                && next_url_post[0] == '/'
+                && strstr(next_url_post, "/rdp/") != NULL) {
+
+            char* next_ft = guac_rdp_aad_extract_config_value(
+                    login_page->data, "sFT");
+            char* next_ctx = guac_rdp_aad_extract_config_value(
+                    login_page->data, "sCtx");
+            char* next_canary = guac_rdp_aad_extract_config_value(
+                    login_page->data, "canary");
+
+            if (next_ft != NULL && next_ctx != NULL && next_canary != NULL) {
+
+                guac_client_log(client, GUAC_LOG_DEBUG,
+                        "AAD: Following interstitial step to %s",
+                        next_url_post);
+
+                /* Resolve the relative urlPost against the AAD host */
+                char next_url[1024];
+                snprintf(next_url, sizeof(next_url),
+                        "https://login.microsoftonline.com%s",
+                        next_url_post);
+
+                guac_rdp_aad_form_field interstitial_fields[] = {
+                    { "flowToken",    next_ft },
+                    { "ctx",          next_ctx },
+                    { "canary",       next_canary },
+                    { "LoginOptions", "3" },
+                };
+                char* next_body = guac_rdp_aad_build_form_body(curl,
+                        interstitial_fields,
+                        sizeof(interstitial_fields)
+                                / sizeof(interstitial_fields[0]));
+
+                /* Reset response buffer for the second POST */
+                guac_rdp_aad_response_free(login_page);
+                login_page = guac_rdp_aad_response_alloc();
+
+                if (next_body != NULL && login_page != NULL) {
+
+                    struct curl_slist* next_headers = NULL;
+                    next_headers = curl_slist_append(next_headers,
+                            "Content-Type: application/x-www-form-urlencoded");
+                    next_headers = curl_slist_append(next_headers,
+                            "Origin: https://login.microsoftonline.com");
+                    next_headers = curl_slist_append(next_headers,
+                            "Referer: https://login.microsoftonline.com/common/login");
+
+                    curl_easy_setopt(curl, CURLOPT_URL, next_url);
+                    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, next_body);
+                    curl_easy_setopt(curl, CURLOPT_WRITEDATA, login_page);
+                    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, next_headers);
+
+                    res = curl_easy_perform(curl);
+                    curl_slist_free_all(next_headers);
+
+                    if (res == CURLE_OK) {
+                        char* next_effective = NULL;
+                        curl_easy_getinfo(curl,
+                                CURLINFO_EFFECTIVE_URL, &next_effective);
+
+                        guac_client_log(client, GUAC_LOG_DEBUG,
+                                "AAD: Interstitial POST redirected to: %s",
+                                next_effective ? next_effective : "(NULL)");
+
+                        if (next_effective != NULL
+                                && strncmp(next_effective,
+                                        GUAC_AAD_NATIVE_REDIRECT_URI,
+                                        strlen(GUAC_AAD_NATIVE_REDIRECT_URI))
+                                                == 0) {
+                            auth_code = guac_rdp_aad_extract_auth_code(
+                                    client, next_effective);
+                        }
+                    }
+                    else {
+                        guac_client_log(client, GUAC_LOG_ERROR,
+                                "AAD: Interstitial POST failed: %s",
+                                curl_easy_strerror(res));
+                    }
+                }
+
+                guac_mem_free(next_body);
+            }
+
+            guac_mem_free(next_ft);
+            guac_mem_free(next_ctx);
+            guac_mem_free(next_canary);
+        }
+
+        guac_mem_free(next_url_post);
+    }
+
+    /* Credential POST did not redirect to the native client URI (and the
+     * interstitial follow-up, if any, also did not reach it) */
+    if (auth_code == NULL) {
 
         /* Log any error from the effective URL */
         if (effective_url != NULL
