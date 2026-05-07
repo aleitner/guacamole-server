@@ -1682,7 +1682,7 @@ void guac_rdp_push_settings(guac_client* client,
                 "Azure AD authentication requested but not supported by this version of FreeRDP. "
                 "FreeRDP 3.0 or later is required.");
         #endif
-    break;
+            break;
 
         /* All security types */
         case GUAC_SECURITY_ANY:
@@ -1926,11 +1926,23 @@ void guac_rdp_push_settings(guac_client* client,
             rdp_settings->VmConnectMode = TRUE;
             break;
 
-        /* Azure AD authentication (not supported on FreeRDP 2) */
+        /* Azure AD authentication */
         case GUAC_SECURITY_AAD:
+            rdp_settings->RdpSecurity = FALSE;
+            rdp_settings->TlsSecurity = FALSE;
+            rdp_settings->NlaSecurity = FALSE;
+            rdp_settings->ExtSecurity = FALSE;
+
+        /* Enable AAD authentication in FreeRDP (only available in FreeRDP 3.0+) */
+        #ifdef HAVE_FREERDP_AAD_SUPPORT
+            rdp_settings->AadSecurity = TRUE;
+            guac_client_log(client, GUAC_LOG_INFO,
+                "Azure AD authentication enabled");
+        #else
             guac_client_log(client, GUAC_LOG_ERROR,
-                "Azure AD authentication is not supported by this "
-                "version of FreeRDP. FreeRDP 3.0 or later is required.");
+                "Azure AD authentication requested but not supported by this version of FreeRDP. "
+                "FreeRDP 3.0 or later is required.");
+        #endif
             break;
 
         /* All security types */
