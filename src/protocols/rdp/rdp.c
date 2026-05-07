@@ -50,6 +50,10 @@
 #include "common-ssh/user.h"
 #endif
 
+#ifdef HAVE_FREERDP_AAD_SUPPORT
+#include "aad.h"
+#endif
+
 #include <freerdp/addin.h>
 #include <freerdp/channels/channels.h>
 #include <freerdp/client.h>
@@ -329,32 +333,35 @@ static BOOL rdp_freerdp_authenticate(freerdp* instance, char** username,
 }
 
 #ifdef HAVE_FREERDP_AAD_SUPPORT
-#include "aad.h"
-
 /**
  * Callback invoked by FreeRDP when an Azure AD access token is required.
+ *
+ * The signature (variadic, with a tokenType discriminator) is dictated by
+ * FreeRDP's pGetAccessToken callback. This implementation only handles
+ * ACCESS_TOKEN_TYPE_AAD; other token types are rejected.
  *
  * @param instance
  *     The FreeRDP instance associated with the RDP session.
  *
  * @param tokenType
- *     The type of access token being requested (ACCESS_TOKEN_TYPE_AAD or
- *     ACCESS_TOKEN_TYPE_AVD).
+ *     The type of access token being requested. Must be
+ *     ACCESS_TOKEN_TYPE_AAD; any other value is rejected.
  *
  * @param token
  *     Pointer to a string which will receive the access token. This function
  *     must allocate and populate this string.
  *
  * @param count
- *     Number of additional variadic arguments.
+ *     Number of additional variadic arguments. For AAD this must be 2.
  *
  * @param ...
- *     Additional arguments (for AAD: scope and req_cnf)
+ *     Additional arguments. For AAD: scope (const char*) and
+ *     req_cnf (const char*).
  *
  * @return
  *     TRUE if an access token was successfully obtained, FALSE otherwise.
  */
-static BOOL rdp_freerdp_get_access_token(freerdp* instance,
+static BOOL rdp_freerdp_get_aad_access_token(freerdp* instance,
         AccessTokenType tokenType, char** token, size_t count, ...) {
 
     rdpContext* context = GUAC_RDP_CONTEXT(instance);
@@ -364,14 +371,15 @@ static BOOL rdp_freerdp_get_access_token(freerdp* instance,
 
     *token = NULL;
 
-    /* Only handle ACCESS_TOKEN_TYPE_AAD for now */
+    /* This callback only handles AAD; reject any other token type */
     if (tokenType != ACCESS_TOKEN_TYPE_AAD) {
         guac_client_log(client, GUAC_LOG_ERROR,
-            "AAD: Unsupported token type: %d", tokenType);
+            "Unsupported access token type: %d (only AAD is supported)",
+            tokenType);
         return FALSE;
     }
 
-    /* Extract scope and req_cnf from variadic arguments */
+    /* AAD requires exactly two variadic arguments: scope and req_cnf */
     if (count < 2) {
         guac_client_log(client, GUAC_LOG_ERROR,
             "AAD: Expected 2 arguments (scope and req_cnf)");
@@ -384,7 +392,11 @@ static BOOL rdp_freerdp_get_access_token(freerdp* instance,
     const char* req_cnf = va_arg(ap, const char*);
     va_end(ap);
 
-    /* Prompt for missing credentials if the client supports it */
+    /* Prompt for missing credentials if the client supports it. AAD
+     * identifies users by UPN (e.g. user@tenant.onmicrosoft.com), so
+     * the legacy 'domain' RDP setting has no role here and is not
+     * prompted for. The tenant is resolved from the UPN suffix by
+     * Microsoft's login endpoints. */
     if (settings->username == NULL || settings->password == NULL) {
 
         if (!guac_client_owner_supports_required(client)) {
@@ -698,7 +710,7 @@ static int guac_rdp_handle_connection(guac_client* client) {
     rdp_inst->Authenticate = rdp_freerdp_authenticate;
 
 #ifdef HAVE_FREERDP_AAD_SUPPORT
-    rdp_inst->GetAccessToken = rdp_freerdp_get_access_token;
+    rdp_inst->GetAccessToken = rdp_freerdp_get_aad_access_token;
 #endif
 
 #ifdef HAVE_FREERDP_VERIFYCERTIFICATEEX
